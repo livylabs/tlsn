@@ -4,6 +4,9 @@ name = "tlsn-examples"
 publish = false
 version = "0.0.0"
 
+[features]
+notary_tee = []
+
 [lints]
 workspace = true
 
@@ -58,3 +61,7 @@ path = "attestation/verify.rs"
 [[example]]
 name = "interactive"
 path = "interactive/interactive.rs"
+
+[[example]]
+name = "tee"
+path = "tee/fetch.rs"
