@@ -1,0 +1,39 @@
+# Docker ignore file for notary-server build
+# Ignore build artifacts
+target/
+**/target/
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Ignore Git
+.git/
+.gitignore
+
+# Ignore documentation
+*.md
+docs/
+
+# Ignore test files
+**/tests/
+**/*_test.rs
+**/*test*.rs
+
+# Ignore CI/CD
+.github/
+.gitlab-ci.yml
+
+# Ignore local config
+.env
+.env.*
+*.local
+
+# Ignore temporary files
+tmp/
+temp/
+*.tmp
+

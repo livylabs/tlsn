@@ -1,0 +1,17 @@
+[package]
+name = "notary-tee"
+version = "0.1.0-alpha.11"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[features]
+notary_tee = []
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lib]
+path = "lib.rs"
+
