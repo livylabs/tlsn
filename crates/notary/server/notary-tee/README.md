@@ -12,11 +12,19 @@ Notary Server → Attestation of Initialization → Atomic attestations for each
 
 For more context, you can look at `fetch.rs` in the examples folder, which takes a `.env` file with the secure enclave configuration.
 
+## Configuration
+
+The notary server can be configured via:
+1. **Config file** using `--config <path-to-config.yaml>`
+2. **Environment variables** with `NS_` prefix (e.g., `NS_PORT`, `NS_TLS__ENABLED`)
+
+For all available configuration options and examples, see the [main server README](../README.md#configuration).
+
 ## Docker Deployment
 
 ### Build the Alpine Image
 
-build manually from the repository root:
+Build from the repository root:
 
 ```bash
 docker build -f crates/notary/server/notary-tee/Dockerfile -t notary-server:alpine .
@@ -37,15 +45,15 @@ docker run --rm \
   -v $(pwd)/config:/config \
   -p 7047:7047 \
   notary-server:alpine \
-  --config-file /config/config.yaml
+  --config /config/config.yaml
 ```
 
-With environment variables:
+With environment variables (prefix `NS_`, separator `__`):
 
 ```bash
 docker run --rm \
-  -e NOTARY_SERVER_HOST=0.0.0.0 \
-  -e NOTARY_SERVER_PORT=7047 \
+  -e NS_HOST=0.0.0.0 \
+  -e NS_PORT=7047 \
   -p 7047:7047 \
   notary-server:alpine
 ```
