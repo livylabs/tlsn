@@ -9,7 +9,7 @@ mod error;
 mod future;
 pub mod state;
 
-pub use config::{ProverConfig, ProverConfigBuilder, ProverConfigBuilderError};
+pub use config::{ProverConfig, ProverConfigBuilder, TlsConfig, TlsConfigBuilder};
 pub use error::ProverError;
 pub use future::ProverFuture;
 pub use tlsn_core::{ProveConfig, ProveConfigBuilder, ProveConfigBuilderError, ProverOutput};
@@ -32,8 +32,9 @@ use tlsn_common::{
     context::build_mt_context,
     encoding,
     mux::attach_mux,
+    tag::verify_tags,
     transcript::{decode_transcript, Record, TlsTranscript},
-    zk_aes::ZkAesCtr,
+    zk_aes_ctr::ZkAesCtr,
     Role,
 };
 use tlsn_core::{
@@ -49,7 +50,7 @@ use tlsn_core::{
 use tlsn_deap::Deap;
 use tokio::sync::Mutex;
 
-use tracing::{debug, info_span, instrument, Instrument, Span};
+use tracing::{debug, info, info_span, instrument, Instrument, Span};
 
 pub(crate) type RCOTSender = mpz_ot::rcot::shared::SharedRCOTSender<
     mpz_ot::kos::Sender<mpz_ot::chou_orlandi::Receiver>,
@@ -111,14 +112,14 @@ impl Prover<state::Initialized> {
 
         let (vm, mut mpc_tls) = build_mpc_tls(&self.config, ctx);
 
-        // Allocate resources for MPC-TLS in VM.
+        // Allocate resources for MPC-TLS in the VM.
         let mut keys = mpc_tls.alloc()?;
         translate_keys(&mut keys, &vm.try_lock().expect("VM is not locked"))?;
 
         // Allocate for committing to plaintext.
-        let mut zk_aes = ZkAesCtr::new(Role::Prover);
-        zk_aes.set_key(keys.server_write_key, keys.server_write_iv);
-        zk_aes.alloc(
+        let mut zk_aes_ctr = ZkAesCtr::new(Role::Prover);
+        zk_aes_ctr.set_key(keys.server_write_key, keys.server_write_iv);
+        zk_aes_ctr.alloc(
             &mut (*vm.try_lock().expect("VM is not locked").zk()),
             self.config.protocol_config().max_recv_data(),
         )?;
@@ -136,7 +137,7 @@ impl Prover<state::Initialized> {
                 mux_ctrl,
                 mux_fut,
                 mpc_tls,
-                zk_aes,
+                zk_aes_ctr,
                 keys,
                 vm,
             },
@@ -162,7 +163,7 @@ impl Prover<state::Setup> {
             mux_ctrl,
             mut mux_fut,
             mpc_tls,
-            mut zk_aes,
+            mut zk_aes_ctr,
             keys,
             vm,
             ..
@@ -180,8 +181,16 @@ impl Prover<state::Setup> {
 
         let config = tls_client::ClientConfig::builder()
             .with_safe_defaults()
-            .with_root_certificates(self.config.crypto_provider().cert.root_store().clone())
-            .with_no_client_auth();
+            .with_root_certificates(self.config.crypto_provider().cert.root_store().clone());
+
+        let config = if let Some((cert, key)) = self.config.tls_config().client_auth() {
+            config
+                .with_single_cert(cert.clone(), key.clone())
+                .map_err(ProverError::config)?
+        } else {
+            config.with_no_client_auth()
+        };
+
         let client =
             ClientConnection::new(Arc::new(config), Box::new(mpc_ctrl.clone()), server_name)
                 .map_err(ProverError::config)?;
@@ -207,31 +216,23 @@ impl Prover<state::Setup> {
                     Ok::<_, ProverError>(())
                 };
 
-                let (_, (mut ctx, mut data)) = futures::try_join!(
+                info!("starting MPC-TLS");
+
+                let (_, (mut ctx, mut data, ..)) = futures::try_join!(
                     conn_fut,
                     mpc_fut.in_current_span().map_err(ProverError::from)
                 )?;
+
+                info!("finished MPC-TLS");
 
                 {
                     let mut vm = vm.try_lock().expect("VM should not be locked");
 
                     translate_transcript(&mut data.transcript, &vm)?;
 
-                    // Prove received plaintext. Prover drops the proof output, as they trust
-                    // themselves.
-                    _ = commit_records(
-                        &mut (*vm.zk()),
-                        &mut zk_aes,
-                        data.transcript
-                            .recv
-                            .iter_mut()
-                            .filter(|record| record.typ == ContentType::ApplicationData),
-                    )
-                    .map_err(ProverError::zk)?;
-
                     debug!("finalizing mpc");
 
-                    // Finalize DEAP and execute the plaintext proofs.
+                    // Finalize DEAP.
                     mux_fut
                         .poll_with(vm.finalize(&mut ctx))
                         .await
@@ -239,6 +240,38 @@ impl Prover<state::Setup> {
 
                     debug!("mpc finalized");
                 }
+
+                // Pull out ZK VM.
+                let (_, mut vm) = Arc::into_inner(vm)
+                    .expect("vm should have only 1 reference")
+                    .into_inner()
+                    .into_inner();
+
+                // Prove tag verification of received records.
+                // The prover drops the proof output.
+                let _ = verify_tags(
+                    &mut vm,
+                    (data.keys.server_write_key, data.keys.server_write_iv),
+                    data.keys.server_write_mac_key,
+                    data.transcript.recv.clone(),
+                )
+                .map_err(ProverError::zk)?;
+
+                // Prove received plaintext. Prover drops the proof output, as
+                // they trust themselves.
+                _ = commit_records(
+                    &mut vm,
+                    &mut zk_aes_ctr,
+                    data.transcript
+                        .recv
+                        .iter_mut()
+                        .filter(|record| record.typ == ContentType::ApplicationData),
+                )
+                .map_err(ProverError::zk)?;
+
+                mux_fut
+                    .poll_with(vm.execute_all(&mut ctx).map_err(ProverError::zk))
+                    .await?;
 
                 let transcript = data
                     .transcript
@@ -285,12 +318,6 @@ impl Prover<state::Setup> {
                                 .expect("only supported key scheme should have been accepted"),
                         }),
                     };
-
-                // Pull out ZK VM.
-                let (_, vm) = Arc::into_inner(vm)
-                    .expect("vm should have only 1 reference")
-                    .into_inner()
-                    .into_inner();
 
                 Ok(Prover {
                     config: self.config,
@@ -627,6 +654,9 @@ fn translate_keys<Mpc, Zk>(keys: &mut SessionKeys, vm: &Deap<Mpc, Zk>) -> Result
         .map_err(ProverError::mpc)?;
     keys.server_write_iv = vm
         .translate(keys.server_write_iv)
+        .map_err(ProverError::mpc)?;
+    keys.server_write_mac_key = vm
+        .translate(keys.server_write_mac_key)
         .map_err(ProverError::mpc)?;
 
     Ok(())

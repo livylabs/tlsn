@@ -1,16 +1,13 @@
 [package]
 name = "notary-server"
-version = "0.1.0-alpha.11"
+version = "0.1.0-alpha.12"
 edition = "2021"
 
 [lints]
 workspace = true
 
 [features]
-tee_quote = [
-	"dep:mc-sgx-dcap-types",
-    "dep:hex",
-]
+tee_quote = ["dep:mc-sgx-dcap-types", "dep:hex"]
 
 [dependencies]
 notary-common = { workspace = true }
@@ -32,6 +29,7 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "server"] }
 hyper-util = { workspace = true, features = ["full"] }
+jsonwebtoken = { version = "9.3.1", features = ["use_pem"] }
 k256 = { workspace = true }
 notify = { version = "6.1.1", default-features = false, features = [
 	"macos_kqueue",
@@ -43,16 +41,18 @@ rand06-compat = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 serde_yaml = { version = "0.9" }
 sha1 = { version = "0.10" }
 structopt = { version = "0.3" }
+strum = { version = "0.27", features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
-tower-http = { version = "0.5", features = ["cors"] }
-tower-service = { version = "0.3" }
-tower-util = { version = "0.3.1" }
+tower-http = { workspace = true, features = ["cors"] }
+tower-service = { workspace = true }
+tower-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }

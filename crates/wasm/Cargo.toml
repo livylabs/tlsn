@@ -1,6 +1,6 @@
 [package]
 name = "tlsn-wasm"
-version = "0.1.0-alpha.11"
+version = "0.1.0-alpha.12"
 edition = "2021"
 repository = "https://github.com/tlsnotary/tlsn.git"
 description = "A core WebAssembly package for TLSNotary."
@@ -13,13 +13,6 @@ workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-
-[package.metadata.wasm-pack.profile.debug]
-debug = false
-
-[package.metadata.wasm-pack.profile.release]
-opt-level = "z"
-wasm-opt = true
 
 [features]
 default = []

@@ -7,6 +7,7 @@ use http_body_util::{BodyExt as _, Either, Empty, Full};
 use hyper::{
     body::{Bytes, Incoming},
     client::conn::http1::Parts,
+    header::AUTHORIZATION,
     Request, Response, StatusCode,
 };
 use hyper_util::rt::TokioIo;
@@ -29,7 +30,7 @@ use tokio_rustls::{
     rustls::{self, ClientConfig, OwnedTrustAnchor, RootCertStore},
     TlsConnector,
 };
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::error::{ClientError, ErrorKind};
 
@@ -137,6 +138,10 @@ pub struct NotaryClient {
     /// in notary server.
     #[builder(setter(into, strip_option), default)]
     api_key: Option<String>,
+    /// JWT token used to call notary server endpoints if JWT authorization is
+    /// enabled in notary server.
+    #[builder(setter(into, strip_option), default)]
+    jwt: Option<String>,
     /// The duration of notarization request timeout in seconds.
     #[builder(default = "60")]
     request_timeout: usize,
@@ -173,6 +178,15 @@ impl NotaryClient {
         &self,
         notarization_request: NotarizationRequest,
     ) -> Result<Accepted, ClientError> {
+        let notary_socket = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
+            .await
+            .map_err(|err| ClientError::new(ErrorKind::Connection, Some(Box::new(err))))?;
+
+        // Setting TCP_NODELAY will improve prover latency.
+        let _ = notary_socket
+            .set_nodelay(true)
+            .map_err(|_|  info!("An error occured when setting TCP_NODELAY. This will result in higher protocol latency."));
+
         if self.tls {
             debug!("Setting up tls connection...");
 
@@ -180,10 +194,6 @@ impl NotaryClient {
                 .with_safe_defaults()
                 .with_root_certificates(self.root_cert_store.clone())
                 .with_no_client_auth();
-
-            let notary_socket = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
-                .await
-                .map_err(|err| ClientError::new(ErrorKind::Connection, Some(Box::new(err))))?;
 
             let notary_connector = TlsConnector::from(Arc::new(notary_client_config));
             let notary_tls_socket = notary_connector
@@ -210,10 +220,6 @@ impl NotaryClient {
                 })
         } else {
             debug!("Setting up tcp connection...");
-
-            let notary_socket = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
-                .await
-                .map_err(|err| ClientError::new(ErrorKind::Connection, Some(Box::new(err))))?;
 
             self.send_request(notary_socket, notarization_request)
                 .await
@@ -289,6 +295,11 @@ impl NotaryClient {
             if let Some(api_key) = &self.api_key {
                 configuration_request_builder =
                     configuration_request_builder.header(X_API_KEY_HEADER, api_key);
+            }
+
+            if let Some(jwt) = &self.jwt {
+                configuration_request_builder =
+                    configuration_request_builder.header(AUTHORIZATION, format!("Bearer {jwt}"));
             }
 
             let configuration_request = configuration_request_builder
