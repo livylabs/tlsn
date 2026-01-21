@@ -10,8 +10,20 @@ workspace = true
 notary_tee = []
 
 [dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+dotenvy = "0.15"
+hex = { workspace = true }
+http = { workspace = true }
+rand = { workspace = true }
+reqwest = "0.12"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "net", "process", "rt-multi-thread", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lib]
 path = "lib.rs"
-

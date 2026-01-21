@@ -12,6 +12,7 @@ members = [
     "crates/notary/client",
     "crates/notary/common",
     "crates/notary/server",
+    "crates/notary/server/notary-tee",
     "crates/notary/tests-integration",
     "crates/prover",
     "crates/server-fixture/certs",
