@@ -4,12 +4,15 @@ FROM rust:alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
+    build-base \
     musl-dev \
     clang \
     clang-dev \
     llvm-dev \
     openssl-dev \
     openssl-libs-static \
+    zlib-static \
+    zlib-dev \
     pkgconfig
 
 WORKDIR /usr/src/tlsn
@@ -17,12 +20,14 @@ WORKDIR /usr/src/tlsn
 # Copy the entire workspace
 COPY . .
 
-# Build the notary-server binary with static linking
+# Provide a default commit hash for build scripts when .git is unavailable
+ENV GIT_COMMIT_HASH=unknown
+
+# Build the notary-server binary
 # Using --locked to use Cargo.lock for reproducible builds
 RUN cargo build --release \
     --package notary-server \
-    --locked \
-    --target x86_64-unknown-linux-musl
+    --locked
 
 # Runtime stage - minimal Alpine image
 FROM alpine:latest
@@ -41,7 +46,7 @@ WORKDIR /home/notary
 
 # Copy the binary from builder
 COPY --from=builder \
-    /usr/src/tlsn/target/x86_64-unknown-linux-musl/release/notary-server \
+    /usr/src/tlsn/target/release/notary-server \
     /usr/local/bin/notary-server
 
 # Make sure binary is executable
@@ -56,6 +61,6 @@ EXPOSE 7047
 # Set entrypoint
 ENTRYPOINT ["notary-server"]
 
-# Default command (can be overridden)
-CMD ["--help"]
+# Default command (run server with defaults)
+CMD []
 

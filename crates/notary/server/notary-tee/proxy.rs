@@ -4,10 +4,13 @@ use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
-use axum::Router;
+use axum::{routing::post, Json, Router};
+use http_body_util::Empty;
+use hyper::{body::Bytes, Request};
+use hyper_util::rt::TokioIo;
 use rand::{Rng, RngCore};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
@@ -18,7 +21,15 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::process::Command;
+use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tracing::{debug, info};
+use url::Url;
+
+use notary_client::{Accepted, NotarizationRequest, NotaryClient};
+use tlsn_common::config::ProtocolConfig;
+use tlsn_core::{request::RequestConfig, transcript::TranscriptCommitConfig, CryptoProvider};
+use tlsn_formats::http::{DefaultHttpCommitter, HttpCommit, HttpTranscript};
+use tlsn_prover::{Prover, ProverConfig};
 
 // Constants are loaded from .env file via ProxyConfig::from_env()
 
@@ -84,6 +95,27 @@ struct AttestationPayload {
     quote_hex: String,
 }
 
+#[derive(Deserialize)]
+struct ProveRequest {
+    url: String,
+    #[serde(default)]
+    headers: Vec<HeaderEntry>,
+}
+
+#[derive(Deserialize)]
+struct HeaderEntry {
+    name: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct ProveResponse {
+    job_id: String,
+    attestation_hash_hex: String,
+    secrets_hash_hex: String,
+    tdx_attestation: Value,
+}
+
 pub async fn run_proxy() -> Result<(), Error> {
     let config = ProxyConfig::from_env()?;
     run_proxy_with_config(config).await
@@ -100,12 +132,245 @@ pub async fn run_proxy_with_config(config: ProxyConfig) -> Result<(), Error> {
     info!("TLSN proxy listening on {}", state.config.listen);
 
     let app = Router::new()
+        .route("/api/v1/prove", post(prove_handler))
         .fallback(handle_request)
         .with_state(state);
 
     axum::serve(listener, app)
         .await
         .map_err(Error::Io)
+}
+
+async fn prove_handler(
+    State(state): State<Arc<ProxyState>>,
+    Json(payload): Json<ProveRequest>,
+) -> Response<Body> {
+    match prove_handler_inner(payload, state).await {
+        Ok(response) => response,
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err),
+    }
+}
+
+async fn prove_handler_inner(
+    payload: ProveRequest,
+    state: Arc<ProxyState>,
+) -> Result<Response<Body>, Error> {
+    let url = Url::parse(&payload.url)
+        .map_err(|e| Error::OperationError(format!("invalid url: {e}")))?;
+    let scheme = url.scheme();
+    if scheme != "https" {
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            Error::OperationError("only https urls are supported".into()),
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| Error::OperationError("url missing host".into()))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    let mut path = url.path().to_string();
+    if path.is_empty() {
+        path.push('/');
+    }
+    if let Some(query) = url.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+
+    let notary_authority = state
+        .config
+        .upstream
+        .authority()
+        .ok_or_else(|| Error::Configuration("TLSN_PROXY_UPSTREAM missing authority".into()))?;
+    let notary_host = notary_authority.host().to_string();
+    let notary_port = notary_authority
+        .port_u16()
+        .unwrap_or_else(|| if state.config.upstream.scheme_str() == Some("https") { 443 } else { 80 });
+    let notary_tls = state.config.upstream.scheme_str() == Some("https");
+
+    let notary_client = NotaryClient::builder()
+        .host(notary_host)
+        .port(notary_port)
+        .enable_tls(notary_tls)
+        .build()
+        .map_err(|e| Error::OperationError(format!("failed to build notary client: {e}")))?;
+
+    let notarization_request = NotarizationRequest::builder()
+        .max_sent_data(1 << 12)
+        .max_recv_data(1 << 14)
+        .build()
+        .map_err(|e| Error::OperationError(format!("failed to build notarization request: {e}")))?;
+
+    let Accepted {
+        io: notary_connection,
+        id: _session_id,
+        ..
+    } = notary_client
+        .request_notarization(notarization_request)
+        .await
+        .map_err(|e| Error::OperationError(format!("notary request failed: {e}")))?;
+
+    let crypto_provider = CryptoProvider::default();
+    let prover_config = ProverConfig::builder()
+        .server_name(host)
+        .protocol_config(
+            ProtocolConfig::builder()
+                .max_sent_data(1 << 12)
+                .max_recv_data(1 << 14)
+                .build()
+                .map_err(|e| Error::OperationError(format!("invalid protocol config: {e}")))?,
+        )
+        .crypto_provider(crypto_provider)
+        .build()
+        .map_err(|e| Error::OperationError(format!("failed to build prover config: {e}")))?;
+
+    let prover = Prover::new(prover_config)
+        .setup(notary_connection.compat())
+        .await
+        .map_err(|e| Error::OperationError(format!("prover setup failed: {e}")))?;
+
+    let client_socket = tokio::net::TcpStream::connect((host, port))
+        .await
+        .map_err(|e| Error::OperationError(format!("failed to connect to target: {e}")))?;
+
+    let (mpc_tls_connection, prover_fut) = prover
+        .connect(client_socket.compat())
+        .await
+        .map_err(|e| Error::OperationError(format!("prover connect failed: {e}")))?;
+    let mpc_tls_connection = TokioIo::new(mpc_tls_connection.compat());
+    let prover_task = tokio::spawn(prover_fut);
+
+    let (mut request_sender, connection) =
+        hyper::client::conn::http1::handshake(mpc_tls_connection)
+            .await
+            .map_err(|e| Error::OperationError(format!("http1 handshake failed: {e}")))?;
+    tokio::spawn(connection);
+
+    let mut request_builder = Request::builder()
+        .method("GET")
+        .uri(&path)
+        .header("Host", host)
+        .header("Accept", "*/*")
+        .header("Accept-Encoding", "identity")
+        .header("Connection", "close")
+        .header("User-Agent", "TLSNotary-Prover/1.0");
+    for header in payload.headers {
+        request_builder = request_builder.header(header.name, header.value);
+    }
+    let request = request_builder
+        .body(Empty::<Bytes>::new())
+        .map_err(|e| Error::OperationError(format!("failed to build request: {e}")))?;
+
+    let response = request_sender
+        .send_request(request)
+        .await
+        .map_err(|e| Error::OperationError(format!("request failed: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Ok(error_response(
+            StatusCode::BAD_GATEWAY,
+            Error::OperationError(format!("upstream returned status {status}")),
+        ));
+    }
+
+    let mut prover = prover_task
+        .await
+        .map_err(|e| Error::OperationError(format!("prover task failed: {e}")))?
+        .map_err(|e| Error::OperationError(format!("prover failed: {e}")))?;
+
+    let transcript = HttpTranscript::parse(prover.transcript())
+        .map_err(|e| Error::OperationError(format!("transcript parse failed: {e}")))?;
+    let mut commit_builder = TranscriptCommitConfig::builder(prover.transcript());
+    DefaultHttpCommitter::default()
+        .commit_transcript(&mut commit_builder, &transcript)
+        .map_err(|e| Error::OperationError(format!("transcript commit failed: {e}")))?;
+    let transcript_commit = commit_builder
+        .build()
+        .map_err(|e| Error::OperationError(format!("transcript commit build failed: {e}")))?;
+
+    let mut request_builder = RequestConfig::builder();
+    request_builder.transcript_commit(transcript_commit);
+    let request_config = request_builder
+        .build()
+        .map_err(|e| Error::OperationError(format!("request config build failed: {e}")))?;
+
+    #[allow(deprecated)]
+    let (attestation, secrets) = prover
+        .notarize(&request_config)
+        .await
+        .map_err(|e| Error::OperationError(format!("notarize failed: {e}")))?;
+
+    let job_id = random_hex(16);
+    let job_dir = state.config.jobs_dir.join(&job_id);
+    fs::create_dir_all(&job_dir).await?;
+
+    let attestation_bytes =
+        bincode::serialize(&attestation).map_err(|e| Error::OperationError(e.to_string()))?;
+    let secrets_bytes =
+        bincode::serialize(&secrets).map_err(|e| Error::OperationError(e.to_string()))?;
+    let attestation_hash = sha256_bytes(&attestation_bytes);
+    let secrets_hash = sha256_bytes(&secrets_bytes);
+
+    let attestation_path = job_dir.join("attestation.tlsn");
+    let secrets_path = job_dir.join("secrets.tlsn");
+    write_atomic(&attestation_path, &attestation_bytes).await?;
+    write_atomic(&secrets_path, &secrets_bytes).await?;
+
+    let nonce = random_bytes_32();
+    let commit = sha256_commit(&attestation_hash, &secrets_hash);
+    let reportdata = build_reportdata(&commit, &nonce);
+    let quote_path = job_dir.join("quote.bin");
+    let tdx_attestation = match run_tdx_quote(&state.config.tdx_cmd, &reportdata, &quote_path).await
+    {
+        Ok(quote) => {
+            let attestation = AttestationPayload {
+                job_id: job_id.clone(),
+                input_hash_hex: hex::encode(attestation_hash),
+                output_hash_hex: hex::encode(secrets_hash),
+                commit_hex: hex::encode(commit),
+                nonce_hex: hex::encode(nonce),
+                reportdata_hex: hex::encode(reportdata),
+                quote_hex: hex::encode(quote),
+            };
+            serde_json::to_value(attestation)?
+        }
+        Err(Error::TdxCliNotFound) => {
+            serde_json::json!({
+                "error": Error::TdxCliNotFound.to_string(),
+                "job_id": job_id,
+            })
+        }
+        Err(Error::TdxCliPermissionDenied) => {
+            serde_json::json!({
+                "error": Error::TdxCliPermissionDenied.to_string(),
+                "job_id": job_id,
+            })
+        }
+        Err(Error::TdxAttestation(msg)) => {
+            let message = if msg.contains("sudo:") || msg.contains("password") {
+                Error::TdxCliPermissionDenied.to_string()
+            } else {
+                "TDX attestation failed".into()
+            };
+            serde_json::json!({
+                "error": message,
+                "job_id": job_id,
+            })
+        }
+        Err(err) => return Err(err),
+    };
+
+    let response = ProveResponse {
+        job_id,
+        attestation_hash_hex: hex::encode(attestation_hash),
+        secrets_hash_hex: hex::encode(secrets_hash),
+        tdx_attestation,
+    };
+
+    Ok(Response::new(Body::from(
+        serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec()),
+    )))
 }
 
 async fn handle_request(
@@ -205,9 +470,6 @@ async fn handle_request_inner(
     let commit = sha256_commit(&input_hash, &output_hash);
     let reportdata = build_reportdata(&commit, &nonce);
 
-    let quote_path = job_dir.join("quote.bin");
-    let quote = run_tdx_quote(&state.config.tdx_cmd, &reportdata, &quote_path).await?;
-
     let meta = Meta {
         job_id: job_id.clone(),
         input_hash_hex: hex::encode(input_hash),
@@ -219,6 +481,10 @@ async fn handle_request_inner(
     let meta_path = job_dir.join("meta.json");
     write_atomic(&meta_path, serde_json::to_string(&meta)?.as_bytes()).await?;
 
+    let quote_path = job_dir.join("quote.bin");
+    let tdx_attestation = match run_tdx_quote(&state.config.tdx_cmd, &reportdata, &quote_path).await
+    {
+        Ok(quote) => {
     let attestation = AttestationPayload {
         job_id,
         input_hash_hex: meta.input_hash_hex,
@@ -227,13 +493,40 @@ async fn handle_request_inner(
         nonce_hex: meta.nonce_hex,
         reportdata_hex: hex::encode(reportdata),
         quote_hex: hex::encode(quote),
+            };
+            serde_json::to_value(attestation)?
+        }
+        Err(Error::TdxCliNotFound) => {
+            serde_json::json!({
+                "error": Error::TdxCliNotFound.to_string(),
+                "job_id": job_id,
+            })
+        }
+        Err(Error::TdxCliPermissionDenied) => {
+            serde_json::json!({
+                "error": Error::TdxCliPermissionDenied.to_string(),
+                "job_id": job_id,
+            })
+        }
+        Err(Error::TdxAttestation(msg)) => {
+            let message = if msg.contains("sudo:") || msg.contains("password") {
+                Error::TdxCliPermissionDenied.to_string()
+            } else {
+                "TDX attestation failed".into()
+            };
+            serde_json::json!({
+                "error": message,
+                "job_id": job_id,
+            })
+        }
+        Err(err) => return Err(err),
     };
 
     Ok(build_response(
         status,
         headers,
         response_bytes,
-        attestation,
+        tdx_attestation,
     ))
 }
 
@@ -257,45 +550,39 @@ fn build_response(
     status: StatusCode,
     headers: HeaderMap,
     response_bytes: Vec<u8>,
-    attestation: AttestationPayload,
+    tdx_attestation: Value,
 ) -> Response<Body> {
     // Always wrap response in JSON with attestation
     let json = match serde_json::from_slice::<Value>(&response_bytes) {
-        Ok(mut value) if value.is_object() => {
-            value
-                .as_object_mut()
-                .expect("checked object")
-                .insert("tdx_attestation".into(), serde_json::to_value(attestation).unwrap());
-            value
-        }
-        Ok(value) => {
-            let mut map = serde_json::Map::new();
+            Ok(mut value) if value.is_object() => {
+                value
+                    .as_object_mut()
+                    .expect("checked object")
+                .insert("tdx_attestation".into(), tdx_attestation);
+                value
+            }
+            Ok(value) => {
+                let mut map = serde_json::Map::new();
             map.insert("body".into(), value);
-            map.insert(
-                "tdx_attestation".into(),
-                serde_json::to_value(attestation).unwrap(),
-            );
-            Value::Object(map)
-        }
-        Err(_) => {
-            let mut map = serde_json::Map::new();
+            map.insert("tdx_attestation".into(), tdx_attestation);
+                Value::Object(map)
+            }
+            Err(_) => {
+                let mut map = serde_json::Map::new();
             map.insert("body_hex".into(), Value::String(hex::encode(&response_bytes)));
-            map.insert(
-                "tdx_attestation".into(),
-                serde_json::to_value(attestation).unwrap(),
-            );
-            Value::Object(map)
-        }
-    };
+            map.insert("tdx_attestation".into(), tdx_attestation);
+                Value::Object(map)
+            }
+        };
 
-    let body = serde_json::to_vec(&json).unwrap_or_else(|_| b"{}".to_vec());
+        let body = serde_json::to_vec(&json).unwrap_or_else(|_| b"{}".to_vec());
     let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    copy_response_headers(&headers, response.headers_mut());
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+        *response.status_mut() = status;
+        copy_response_headers(&headers, response.headers_mut());
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
     response
 }
 
@@ -445,7 +732,13 @@ async fn run_tdx_quote(
         .next()
         .ok_or_else(|| Error::TdxAttestation("empty tdx command".into()))?;
     let args: Vec<&str> = parts.collect();
-    let output = Command::new(program).args(args).output().await?;
+    let output = Command::new(program).args(args).output().await.map_err(|e| {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => Error::TdxCliNotFound,
+            std::io::ErrorKind::PermissionDenied => Error::TdxCliPermissionDenied,
+            _ => Error::TdxAttestation(format!("failed to execute tdx command: {}", e)),
+        }
+    })?;
     if !output.status.success() {
         return Err(Error::TdxAttestation(format!(
             "tdx command failed: {}",

@@ -21,6 +21,12 @@ pub enum Error {
     #[error("proxy tdx attestation error: {0}")]
     TdxAttestation(String),
 
+    #[error("TDX attestation CLI is not installed")]
+    TdxCliNotFound,
+
+    #[error("TDX attestation CLI lacks required privileges")]
+    TdxCliPermissionDenied,
+
     #[error("proxy serde json error: {0}")]
     SerdeJson(#[from] serde_json::Error),
 

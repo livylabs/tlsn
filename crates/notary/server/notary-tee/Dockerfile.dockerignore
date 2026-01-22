@@ -19,9 +19,8 @@ target/
 docs/
 
 # Ignore test files
-**/tests/
-**/*_test.rs
-**/*test*.rs
+# (Keep tests in the Docker build context so workspace manifests that reference
+# them don't fail to parse.)
 
 # Ignore CI/CD
 .github/
