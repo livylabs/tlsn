@@ -1,18 +1,19 @@
 use crate::error::Error;
 use crate::types::{env_var, env_var_parse};
-use axum::body::{to_bytes, Body};
-use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
-use axum::response::Response;
-use axum::{routing::post, Json, Router};
-use http_body_util::Empty;
-use hyper::{body::Bytes, Request};
-use hyper_util::rt::TokioIo;
+use http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use http_body_util::{BodyExt, Empty, Full};
+use hyper::body::{Bytes, Incoming};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use rand::{Rng, RngCore};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -70,9 +71,11 @@ impl ProxyConfig {
 
 #[derive(Clone)]
 struct ProxyState {
-    client: Client,
+    client: Client<HttpConnector, Full<Bytes>>,
     config: ProxyConfig,
 }
+
+type ResponseBody = Full<Bytes>;
 
 #[derive(Serialize)]
 struct Meta {
@@ -124,27 +127,67 @@ pub async fn run_proxy() -> Result<(), Error> {
 pub async fn run_proxy_with_config(config: ProxyConfig) -> Result<(), Error> {
     fs::create_dir_all(&config.jobs_dir).await?;
 
-    let client = Client::new();
+    let mut http_connector = HttpConnector::new();
+    http_connector.enforce_http(true);
+    let client = Client::builder(TokioExecutor::new()).build(http_connector);
 
     let state = Arc::new(ProxyState { client, config });
     let listener = TcpListener::bind(state.config.listen).await?;
 
     info!("TLSN proxy listening on {}", state.config.listen);
 
-    let app = Router::new()
-        .route("/api/v1/prove", post(prove_handler))
-        .fallback(handle_request)
-        .with_state(state);
-
-    axum::serve(listener, app)
-        .await
-        .map_err(Error::Io)
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req| route_request(req, state.clone()));
+            if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                debug!("connection error from {}: {}", addr, err);
+            }
+        });
+    }
 }
 
-async fn prove_handler(
-    State(state): State<Arc<ProxyState>>,
-    Json(payload): Json<ProveRequest>,
-) -> Response<Body> {
+async fn route_request(
+    req: Request<Incoming>,
+    state: Arc<ProxyState>,
+) -> Result<Response<ResponseBody>, Infallible> {
+    let response = if req.method() == Method::POST && req.uri().path() == "/api/v1/prove" {
+        prove_handler(req, state).await
+    } else {
+        handle_request(req, state).await
+    };
+    Ok(response)
+}
+
+async fn prove_handler(req: Request<Incoming>, state: Arc<ProxyState>) -> Response<ResponseBody> {
+    let body = req.into_body();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(err) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                Error::Upstream(format!("failed to read request body: {err}")),
+            )
+        }
+    };
+    if body_bytes.len() > state.config.max_body_bytes {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Error::Upstream("request body too large".into()),
+        );
+    }
+    let payload: ProveRequest = match serde_json::from_slice(&body_bytes) {
+        Ok(payload) => payload,
+        Err(err) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                Error::OperationError(format!("invalid json body: {err}")),
+            )
+        }
+    };
+
     match prove_handler_inner(payload, state).await {
         Ok(response) => response,
         Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err),
@@ -154,7 +197,7 @@ async fn prove_handler(
 async fn prove_handler_inner(
     payload: ProveRequest,
     state: Arc<ProxyState>,
-) -> Result<Response<Body>, Error> {
+) -> Result<Response<ResponseBody>, Error> {
     let url = Url::parse(&payload.url)
         .map_err(|e| Error::OperationError(format!("invalid url: {e}")))?;
     let scheme = url.scheme();
@@ -368,15 +411,12 @@ async fn prove_handler_inner(
         tdx_attestation,
     };
 
-    Ok(Response::new(Body::from(
+    Ok(Response::new(Full::new(Bytes::from(
         serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec()),
-    )))
+    ))))
 }
 
-async fn handle_request(
-    State(state): State<Arc<ProxyState>>,
-    req: axum::http::Request<Body>,
-) -> Response<Body> {
+async fn handle_request(req: Request<Incoming>, state: Arc<ProxyState>) -> Response<ResponseBody> {
     match handle_request_inner(req, state).await {
         Ok(response) => response,
         Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err),
@@ -384,9 +424,9 @@ async fn handle_request(
 }
 
 async fn handle_request_inner(
-    req: axum::http::Request<Body>,
+    req: Request<Incoming>,
     state: Arc<ProxyState>,
-) -> Result<Response<Body>, Error> {
+) -> Result<Response<ResponseBody>, Error> {
     if is_upgrade_request(&req) {
         return Ok(error_response(
             StatusCode::NOT_IMPLEMENTED,
@@ -401,9 +441,11 @@ async fn handle_request_inner(
     }
 
     let (parts, body) = req.into_parts();
-    let body_bytes = to_bytes(body, state.config.max_body_bytes)
+    let body_bytes = body
+        .collect()
         .await
-        .map_err(|err| Error::Upstream(format!("failed to read request body: {err}")))?;
+        .map_err(|err| Error::Upstream(format!("failed to read request body: {err}")))?
+        .to_bytes();
     if body_bytes.len() > state.config.max_body_bytes {
         return Ok(error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -423,26 +465,26 @@ async fn handle_request_inner(
     let upstream_uri = join_upstream_uri(&state.config.upstream, &parts.uri)?;
     let upstream_url = upstream_uri.to_string();
 
-    let mut upstream_req = state.client.request(
-        parts.method.clone(),
-        &upstream_url,
-    );
+    let mut upstream_req_builder = Request::builder()
+        .method(parts.method.clone())
+        .uri(upstream_uri);
 
     // Copy headers
     for (name, value) in parts.headers.iter() {
         if name != header::HOST && name != header::CONNECTION {
-            if let Ok(value_str) = value.to_str() {
-                upstream_req = upstream_req.header(name.as_str(), value_str);
-            }
+            upstream_req_builder = upstream_req_builder.header(name, value);
         }
     }
 
     // Set body
-    let upstream_req = upstream_req.body(body_bytes.to_vec());
+    let upstream_req = upstream_req_builder
+        .body(Full::new(Bytes::from(body_bytes.to_vec())))
+        .map_err(|e| Error::Upstream(format!("failed to build upstream request: {e}")))?;
 
     debug!("proxy forward -> {}", upstream_url);
-    let upstream_res = upstream_req
-        .send()
+    let upstream_res = state
+        .client
+        .request(upstream_req)
         .await
         .map_err(|e| Error::Upstream(format!("client request failed: {}", e)))?;
     
@@ -450,9 +492,11 @@ async fn handle_request_inner(
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let headers = upstream_res.headers().clone();
     let response_bytes: Vec<u8> = upstream_res
-        .bytes()
+        .into_body()
+        .collect()
         .await
         .map_err(|e| Error::Upstream(format!("failed to read response body: {}", e)))?
+        .to_bytes()
         .to_vec();
 
     if response_bytes.len() > state.config.max_body_bytes {
@@ -551,7 +595,7 @@ fn build_response(
     headers: HeaderMap,
     response_bytes: Vec<u8>,
     tdx_attestation: Value,
-) -> Response<Body> {
+) -> Response<ResponseBody> {
     // Always wrap response in JSON with attestation
     let json = match serde_json::from_slice::<Value>(&response_bytes) {
             Ok(mut value) if value.is_object() => {
@@ -576,7 +620,7 @@ fn build_response(
         };
 
         let body = serde_json::to_vec(&json).unwrap_or_else(|_| b"{}".to_vec());
-    let mut response = Response::new(Body::from(body));
+        let mut response = Response::new(Full::new(Bytes::from(body)));
         *response.status_mut() = status;
         copy_response_headers(&headers, response.headers_mut());
         response.headers_mut().insert(
@@ -586,11 +630,11 @@ fn build_response(
     response
 }
 
-fn error_response(status: StatusCode, err: Error) -> Response<Body> {
+fn error_response(status: StatusCode, err: Error) -> Response<ResponseBody> {
     let body = serde_json::json!({
         "error": err.to_string(),
     });
-    let mut response = Response::new(Body::from(body.to_string()));
+    let mut response = Response::new(Full::new(Bytes::from(body.to_string())));
     *response.status_mut() = status;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -661,7 +705,7 @@ fn random_bytes_32() -> [u8; 32] {
     bytes
 }
 
-fn is_upgrade_request(req: &axum::http::Request<Body>) -> bool {
+fn is_upgrade_request(req: &Request<Incoming>) -> bool {
     if req.headers().contains_key(header::UPGRADE) {
         return true;
     }
