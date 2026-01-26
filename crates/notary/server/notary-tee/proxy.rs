@@ -759,30 +759,58 @@ async fn run_tdx_quote(
     reportdata: &[u8; 64],
     output_path: &Path,
 ) -> Result<Vec<u8>, Error> {
+    use base64::Engine;
     let reportdata_hex = hex::encode(reportdata);
+    let reportdata_b64 = base64::engine::general_purpose::STANDARD.encode(reportdata);
     let tmp_path = output_path.with_extension("tmp");
     let output_arg = tmp_path.to_string_lossy();
 
-    let cmd = if cmd_template.contains("{reportdata}") || cmd_template.contains("{output}") {
+    let cmd = if cmd_template.contains("{reportdata}") || cmd_template.contains("{reportdata_b64}") || cmd_template.contains("{output}") {
         cmd_template
             .replace("{reportdata}", &reportdata_hex)
+            .replace("{reportdata_b64}", &reportdata_b64)
             .replace("{output}", &output_arg)
     } else {
-        format!("{cmd_template} --report-data {reportdata_hex} --output {output_arg}")
+        // Default fallback: use -u with base64 and --output for trustauthority-cli format
+        format!("{cmd_template} -u {reportdata_b64} --output {output_arg}")
     };
 
-    let mut parts = cmd.split_whitespace();
-    let program = parts
-        .next()
-        .ok_or_else(|| Error::TdxAttestation("empty tdx command".into()))?;
-    let args: Vec<&str> = parts.collect();
-    let output = Command::new(program).args(args).output().await.map_err(|e| {
-        match e.kind() {
-            std::io::ErrorKind::NotFound => Error::TdxCliNotFound,
-            std::io::ErrorKind::PermissionDenied => Error::TdxCliPermissionDenied,
-            _ => Error::TdxAttestation(format!("failed to execute tdx command: {}", e)),
-        }
-    })?;
+    // Check if command contains sudo or shell operators - use shell execution
+    let needs_shell = cmd.contains("sudo") || cmd.contains("|") || cmd.contains("&&") || cmd.contains(";");
+    
+    let output = if needs_shell {
+        // Use shell for complex commands (e.g., sudo)
+        Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .await
+            .map_err(|e| {
+                match e.kind() {
+                    std::io::ErrorKind::NotFound => Error::TdxCliNotFound,
+                    std::io::ErrorKind::PermissionDenied => Error::TdxCliPermissionDenied,
+                    _ => Error::TdxAttestation(format!("failed to execute tdx command: {}", e)),
+                }
+            })?
+    } else {
+        // Parse and execute directly for simple commands
+        let mut parts = cmd.split_whitespace();
+        let program = parts
+            .next()
+            .ok_or_else(|| Error::TdxAttestation("empty tdx command".into()))?;
+        let args: Vec<&str> = parts.collect();
+        Command::new(program)
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| {
+                match e.kind() {
+                    std::io::ErrorKind::NotFound => Error::TdxCliNotFound,
+                    std::io::ErrorKind::PermissionDenied => Error::TdxCliPermissionDenied,
+                    _ => Error::TdxAttestation(format!("failed to execute tdx command: {}", e)),
+                }
+            })?
+    };
     if !output.status.success() {
         return Err(Error::TdxAttestation(format!(
             "tdx command failed: {}",
