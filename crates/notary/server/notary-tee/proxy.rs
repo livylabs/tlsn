@@ -178,12 +178,31 @@ async fn route_request(
         {
             return Ok(download_attestation_handler(job_id, state).await);
         }
+        if let Some(job_id) = path
+            .strip_prefix("/api/v1/jobs/")
+            .and_then(|value| value.strip_suffix("/secrets"))
+        {
+            return Ok(download_secrets_handler(job_id, state).await);
+        }
     }
     Ok(handle_request(req, state).await)
 }
 
 async fn download_attestation_handler(
     job_id: &str,
+    state: Arc<ProxyState>,
+) -> Response<ResponseBody> {
+    download_job_artifact(job_id, "attestation.tlsn", "attestation not found", state).await
+}
+// Do we need some protection here?
+async fn download_secrets_handler(job_id: &str, state: Arc<ProxyState>) -> Response<ResponseBody> {
+    download_job_artifact(job_id, "secrets.tlsn", "secrets not found", state).await
+}
+
+async fn download_job_artifact(
+    job_id: &str,
+    filename: &str,
+    not_found_error: &str,
     state: Arc<ProxyState>,
 ) -> Response<ResponseBody> {
     if job_id.len() != 32
@@ -196,19 +215,19 @@ async fn download_attestation_handler(
         );
     }
 
-    let attestation_path = state.config.jobs_dir.join(job_id).join("attestation.tlsn");
-    let attestation_bytes = match fs::read(&attestation_path).await {
+    let artifact_path = state.config.jobs_dir.join(job_id).join(filename);
+    let artifact_bytes = match fs::read(&artifact_path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return error_response(
                 StatusCode::NOT_FOUND,
-                Error::OperationError("attestation not found".into()),
+                Error::OperationError(not_found_error.into()),
             );
         }
         Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, Error::Io(err)),
     };
 
-    let mut response = Response::new(Full::new(Bytes::from(attestation_bytes)));
+    let mut response = Response::new(Full::new(Bytes::from(artifact_bytes)));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,

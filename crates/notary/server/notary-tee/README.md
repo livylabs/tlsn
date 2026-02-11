@@ -75,7 +75,13 @@ curl -sS "http://127.0.0.1:7048/api/v1/jobs/<job_id>/attestation" \
   --output "attestation-<job_id>.tlsn"
 ```
 
+To download the raw TLSN secrets binary for a job:
+
+```bash
+curl -sS "http://127.0.0.1:7048/api/v1/jobs/<job_id>/secrets" \
+  --output "secrets-<job_id>.tlsn"
+```
+
 Notes:
 - `job_id` must be a 32-character hex string.
 - The endpoint returns `404` if the artifact does not exist.
-
