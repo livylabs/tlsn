@@ -64,6 +64,10 @@ docker run --rm \
 artifacts to `${TLSN_PROXY_JOBS_DIR}/${job_id}` (for example,
 `/tmp/tlsn-proxy/<job_id>` when using `.env.example`).
 
+On startup, the proxy prunes old job directories in `TLSN_PROXY_JOBS_DIR`.
+Retention is controlled by `TLSN_PROXY_JOB_RETENTION_MINUTES` (default `1440`).
+Set it to `0` to disable startup cleanup.
+
 To download the raw TLSN attestation binary for a job:
 
 ```bash
@@ -74,6 +78,4 @@ curl -sS "http://127.0.0.1:7048/api/v1/jobs/<job_id>/attestation" \
 Notes:
 - `job_id` must be a 32-character hex string.
 - The endpoint returns `404` if the artifact does not exist.
-- Current implementation does not include automatic retention cleanup.
-
 

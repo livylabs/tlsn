@@ -6,6 +6,9 @@ pub enum Error {
     #[error("TEE operation error: {0}")]
     OperationError(String),
 
+    #[error("proxy cleanup error: {0}")]
+    Cleanup(String),
+
     #[error("proxy io error: {0}")]
     Io(#[from] std::io::Error),
 

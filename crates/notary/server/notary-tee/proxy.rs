@@ -17,6 +17,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -39,6 +40,7 @@ pub struct ProxyConfig {
     listen: SocketAddr,
     upstream: Uri,
     jobs_dir: PathBuf,
+    job_retention_minutes: u64,
     max_body_bytes: usize,
     tdx_cmd: String,
 }
@@ -55,6 +57,16 @@ impl ProxyConfig {
         let listen = env_var_parse::<SocketAddr>("TLSN_PROXY_LISTEN", "0.0.0.0:7048")?;
         let upstream = env_var_parse::<Uri>("TLSN_PROXY_UPSTREAM", "http://127.0.0.1:7047")?;
         let jobs_dir = PathBuf::from(env_var("TLSN_PROXY_JOBS_DIR")?);
+        let job_retention_minutes = std::env::var("TLSN_PROXY_JOB_RETENTION_MINUTES")
+            .ok()
+            .map_or(Ok(1440_u64), |value| {
+                value.parse::<u64>().map_err(|e| {
+                    Error::Configuration(format!(
+                        "Invalid TLSN_PROXY_JOB_RETENTION_MINUTES format: {:?}. Expected format: non-negative integer minutes",
+                        e
+                    ))
+                })
+            })?;
         let max_body_bytes = env_var_parse::<usize>("TLSN_PROXY_MAX_BODY_BYTES", "positive integer")?;
         let tdx_cmd = env_var("TLSN_PROXY_TDX_CMD")?;
 
@@ -62,6 +74,7 @@ impl ProxyConfig {
             listen,
             upstream,
             jobs_dir,
+            job_retention_minutes,
             max_body_bytes,
             tdx_cmd,
         })
@@ -126,6 +139,7 @@ pub async fn run_proxy() -> Result<(), Error> {
 
 pub async fn run_proxy_with_config(config: ProxyConfig) -> Result<(), Error> {
     fs::create_dir_all(&config.jobs_dir).await?;
+    cleanup_expired_jobs(&config.jobs_dir, config.job_retention_minutes).await?;
 
     let mut http_connector = HttpConnector::new();
     http_connector.enforce_http(true);
@@ -188,7 +202,7 @@ async fn download_attestation_handler(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return error_response(
                 StatusCode::NOT_FOUND,
-                Error::Upstream("attestation not found".into()),
+                Error::OperationError("attestation not found".into()),
             );
         }
         Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, Error::Io(err)),
@@ -870,4 +884,75 @@ fn current_time_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+async fn cleanup_expired_jobs(jobs_dir: &Path, retention_minutes: u64) -> Result<(), Error> {
+    if retention_minutes == 0 {
+        info!("Skipping startup job cleanup (TLSN_PROXY_JOB_RETENTION_MINUTES=0)");
+        return Ok(());
+    }
+
+    let cutoff = Duration::from_secs(retention_minutes.saturating_mul(60));
+    let now = SystemTime::now();
+    let mut removed = 0_usize;
+    let mut entries = fs::read_dir(jobs_dir).await.map_err(|e| {
+        Error::Cleanup(format!(
+            "cleanup failed to read jobs dir '{}': {}",
+            jobs_dir.display(),
+            e
+        ))
+    })?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        Error::Cleanup(format!(
+            "cleanup failed while iterating jobs dir '{}': {}",
+            jobs_dir.display(),
+            e
+        ))
+    })? {
+        let entry_path = entry.path();
+        let file_type = entry.file_type().await.map_err(|e| {
+            Error::Cleanup(format!(
+                "cleanup failed to read file type '{}': {}",
+                entry_path.display(),
+                e
+            ))
+        })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let metadata = entry.metadata().await.map_err(|e| {
+            Error::Cleanup(format!(
+                "cleanup failed to read metadata '{}': {}",
+                entry_path.display(),
+                e
+            ))
+        })?;
+        let modified = metadata.modified().map_err(|e| {
+            Error::Cleanup(format!(
+                "cleanup failed to read modified time '{}': {}",
+                entry_path.display(),
+                e
+            ))
+        })?;
+        let age = now.duration_since(modified).unwrap_or_default();
+
+        if age >= cutoff {
+            fs::remove_dir_all(&entry_path).await.map_err(|e| {
+                Error::Cleanup(format!(
+                    "cleanup failed to remove '{}': {}",
+                    entry_path.display(),
+                    e
+                ))
+            })?;
+            removed += 1;
+        }
+    }
+
+    info!(
+        "Startup job cleanup completed: removed={}, retention_minutes={}",
+        removed, retention_minutes
+    );
+    Ok(())
 }
