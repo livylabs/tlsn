@@ -153,12 +153,54 @@ async fn route_request(
     req: Request<Incoming>,
     state: Arc<ProxyState>,
 ) -> Result<Response<ResponseBody>, Infallible> {
-    let response = if req.method() == Method::POST && req.uri().path() == "/api/v1/prove" {
-        prove_handler(req, state).await
-    } else {
-        handle_request(req, state).await
+    let path = req.uri().path().trim_end_matches('/');
+    if req.method() == Method::POST && path == "/api/v1/prove" {
+        return Ok(prove_handler(req, state).await);
+    }
+    if req.method() == Method::GET {
+        if let Some(job_id) = path
+            .strip_prefix("/api/v1/jobs/")
+            .and_then(|value| value.strip_suffix("/attestation"))
+        {
+            return Ok(download_attestation_handler(job_id, state).await);
+        }
+    }
+    Ok(handle_request(req, state).await)
+}
+
+async fn download_attestation_handler(
+    job_id: &str,
+    state: Arc<ProxyState>,
+) -> Response<ResponseBody> {
+    if job_id.len() != 32
+        || job_id.contains('/')
+        || !job_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            Error::OperationError("invalid job id format".into()),
+        );
+    }
+
+    let attestation_path = state.config.jobs_dir.join(job_id).join("attestation.tlsn");
+    let attestation_bytes = match fs::read(&attestation_path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                Error::Upstream("attestation not found".into()),
+            );
+        }
+        Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, Error::Io(err)),
     };
-    Ok(response)
+
+    let mut response = Response::new(Full::new(Bytes::from(attestation_bytes)));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response
 }
 
 async fn prove_handler(req: Request<Incoming>, state: Arc<ProxyState>) -> Response<ResponseBody> {
