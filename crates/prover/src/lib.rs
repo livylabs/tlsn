@@ -31,6 +31,7 @@ use tlsn_common::{
     commit::{commit_records, hash::prove_hash},
     context::build_mt_context,
     encoding,
+    msg::TdxPayload,
     mux::attach_mux,
     tag::verify_tags,
     transcript::{decode_transcript, Record, TlsTranscript},
@@ -549,6 +550,30 @@ impl Prover<state::Committed> {
             .map_err(ProverError::attestation)?;
 
         Ok((attestation, secrets))
+    }
+
+    /// Requests an attestation from the verifier and then receives a TDX payload.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The attestation request configuration.
+    #[instrument(parent = &self.span, level = "info", skip_all, err)]
+    #[deprecated(
+        note = "attestation functionality will be removed from this API in future releases."
+    )]
+    pub async fn notarize_with_tdx(
+        &mut self,
+        config: &RequestConfig,
+    ) -> Result<(Attestation, Secrets, TdxPayload), ProverError> {
+        #[allow(deprecated)]
+        let (attestation, secrets) = self.notarize(config).await?;
+        let state::Committed { mux_fut, ctx, .. } = &mut self.state;
+
+        let tdx_payload: TdxPayload = mux_fut
+            .poll_with(ctx.io_mut().expect_next().map_err(ProverError::from))
+            .await?;
+
+        Ok((attestation, secrets, tdx_payload))
     }
 
     /// Closes the connection with the verifier.

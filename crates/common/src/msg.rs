@@ -12,3 +12,19 @@ pub struct ServerIdentityProof {
     /// Server identity data.
     pub data: ServerCertData,
 }
+
+/// TDX attestation payload sent from Verifier (Notary) to Prover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdxPayload {
+    /// Session identifier tied to this payload.
+    pub session_id: String,
+    /// Raw quote bytes encoded as lowercase hex.
+    pub raw_quote: Option<String>,
+    /// SGX/TDX signer measurement.
+    pub mrsigner: Option<String>,
+    /// SGX/TDX enclave measurement.
+    pub mrenclave: Option<String>,
+    /// Optional error message if attestation generation failed.
+    pub error: Option<String>,
+}
