@@ -33,13 +33,20 @@ pub struct NotarizationRequestQuery {
     pub session_id: String,
 }
 
+/// Configuration associated with a notarization session.
+#[derive(Debug, Clone, Default)]
+pub struct SessionConfig {
+    /// Whether the prover requested an additional TDX payload message.
+    pub want_tdx_payload: bool,
+}
+
 /// Global data that needs to be shared with the axum handlers
 #[derive(Clone)]
 pub struct NotaryGlobals {
     pub crypto_provider: Arc<CryptoProvider>,
     pub notarization_config: NotarizationProperties,
     /// A temporary storage to store session_id
-    pub store: Arc<Mutex<HashMap<String, ()>>>,
+    pub store: Arc<Mutex<HashMap<String, SessionConfig>>>,
     /// Selected authorization mode if any
     pub authorization_mode: Option<AuthorizationMode>,
     /// A semaphore to acquire a permit for notarization

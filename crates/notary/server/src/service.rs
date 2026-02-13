@@ -30,7 +30,7 @@ use crate::{
         tcp::{tcp_notarize, TcpUpgrade},
         websocket::websocket_notarize,
     },
-    types::{NotarizationRequestQuery, NotaryGlobals},
+    types::{NotarizationRequestQuery, NotaryGlobals, SessionConfig},
 };
 
 /// A wrapper enum to facilitate extracting TCP connection for either WebSocket
@@ -92,26 +92,24 @@ pub async fn upgrade_protocol(
     let session_id = params.session_id;
     // Check if session_id exists in the store, this also removes session_id from
     // the store as each session_id can only be used once
-    if notary_globals
-        .store
-        .lock()
-        .unwrap()
-        .remove(&session_id)
-        .is_none()
-    {
-        let err_msg = format!("Session id {} does not exist", session_id);
-        error!(err_msg);
-        return NotaryServerError::BadProverRequest(err_msg).into_response();
+    let session_config = match notary_globals.store.lock().unwrap().remove(&session_id) {
+        Some(session_config) => session_config,
+        None => {
+            let err_msg = format!("Session id {} does not exist", session_id);
+            error!(err_msg);
+            return NotaryServerError::BadProverRequest(err_msg).into_response();
+        }
     };
+    let want_tdx_payload = session_config.want_tdx_payload;
     // This completes the HTTP Upgrade request and returns a successful response to
     // the client, meanwhile initiating the websocket or tcp connection
     match protocol_upgrade {
         ProtocolUpgrade::Ws(ws) => ws.on_upgrade(move |socket| async move {
-            websocket_notarize(socket, notary_globals, session_id).await;
+            websocket_notarize(socket, notary_globals, session_id, want_tdx_payload).await;
             drop(permit);
         }),
         ProtocolUpgrade::Tcp(tcp) => tcp.on_upgrade(move |stream| async move {
-            tcp_notarize(stream, notary_globals, session_id).await;
+            tcp_notarize(stream, notary_globals, session_id, want_tdx_payload).await;
             drop(permit);
         }),
     }
@@ -172,11 +170,12 @@ pub async fn initialize(
     let prover_session_id = Uuid::new_v4().to_string();
 
     // Store the configuration data in a temporary store
-    notary_globals
-        .store
-        .lock()
-        .unwrap()
-        .insert(prover_session_id.clone(), ());
+    notary_globals.store.lock().unwrap().insert(
+        prover_session_id.clone(),
+        SessionConfig {
+            want_tdx_payload: payload.want_tdx_payload.unwrap_or(false),
+        },
+    );
 
     trace!("Latest store state: {:?}", notary_globals.store);
 
@@ -195,8 +194,9 @@ pub async fn notary_service<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     socket: T,
     notary_globals: NotaryGlobals,
     session_id: &str,
+    want_tdx_payload: bool,
 ) -> Result<(), NotaryServerError> {
-    debug!(?session_id, "Starting notarization...");
+    debug!(?session_id, want_tdx_payload, "Starting notarization...");
 
     let crypto_provider = notary_globals.crypto_provider.clone();
 

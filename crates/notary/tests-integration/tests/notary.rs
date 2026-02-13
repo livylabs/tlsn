@@ -350,6 +350,7 @@ async fn test_websocket_prover() {
         client_type: ClientType::Websocket,
         max_sent_data: Some(MAX_SENT_DATA),
         max_recv_data: Some(MAX_RECV_DATA),
+        want_tdx_payload: None,
     })
     .unwrap();
 

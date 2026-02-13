@@ -12,13 +12,14 @@ pub async fn websocket_notarize(
     socket: WebSocket,
     notary_globals: NotaryGlobals,
     session_id: String,
+    want_tdx_payload: bool,
 ) {
     let start = Instant::now();
     debug!(?session_id, "Upgraded to websocket connection");
     // Wrap the websocket in WsStream so that we have AsyncRead and AsyncWrite
     // implemented
     let stream = WsStream::new(socket.into_inner());
-    match notary_service(stream, notary_globals, &session_id).await {
+    match notary_service(stream, notary_globals, &session_id, want_tdx_payload).await {
         Ok(_) => {
             info!(
                 ?session_id,

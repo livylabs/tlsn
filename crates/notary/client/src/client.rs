@@ -41,6 +41,9 @@ pub struct NotarizationRequest {
     max_sent_data: usize,
     /// Maximum number of bytes that can be received.
     max_recv_data: usize,
+    /// Whether the notary should send an additional TDX payload after attestation.
+    #[builder(default = "false")]
+    want_tdx_payload: bool,
 }
 
 impl NotarizationRequest {
@@ -276,6 +279,7 @@ impl NotaryClient {
                     client_type: ClientType::Tcp,
                     max_sent_data: Some(notarization_request.max_sent_data),
                     max_recv_data: Some(notarization_request.max_recv_data),
+                    want_tdx_payload: Some(notarization_request.want_tdx_payload),
                 })
                 .map_err(|err| {
                     error!("Failed to serialise http request for configuration");
