@@ -53,6 +53,8 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
 
     #[cfg(feature = "tee_quote")]
     let verifying_key_bytes = attestation_key.verifying_key_bytes();
+    #[cfg(feature = "tee_quote")]
+    let tee_quote = quote(verifying_key_bytes).await;
 
     let crypto_provider = build_crypto_provider(attestation_key);
 
@@ -117,6 +119,8 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
         config.notarization.clone(),
         authorization_mode,
         Arc::new(Semaphore::new(config.concurrency)),
+        #[cfg(feature = "tee_quote")]
+        tee_quote.clone(),
     );
 
     // Parameters needed for the info endpoint
@@ -151,7 +155,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
                         public_key: verifying_key_pem,
                         git_commit_hash,
                         #[cfg(feature = "tee_quote")]
-                        quote: quote(verifying_key_bytes).await,
+                        quote: tee_quote.clone(),
                     }),
                 )
                     .into_response()

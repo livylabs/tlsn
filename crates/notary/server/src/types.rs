@@ -51,6 +51,9 @@ pub struct NotaryGlobals {
     pub authorization_mode: Option<AuthorizationMode>,
     /// A semaphore to acquire a permit for notarization
     pub semaphore: Arc<Semaphore>,
+    /// Cached hardware quote included in optional TDX payloads.
+    #[cfg(feature = "tee_quote")]
+    pub tee_quote: Quote,
 }
 
 impl NotaryGlobals {
@@ -59,6 +62,7 @@ impl NotaryGlobals {
         notarization_config: NotarizationProperties,
         authorization_mode: Option<AuthorizationMode>,
         semaphore: Arc<Semaphore>,
+        #[cfg(feature = "tee_quote")] tee_quote: Quote,
     ) -> Self {
         Self {
             crypto_provider,
@@ -66,6 +70,8 @@ impl NotaryGlobals {
             store: Default::default(),
             authorization_mode,
             semaphore,
+            #[cfg(feature = "tee_quote")]
+            tee_quote,
         }
     }
 }

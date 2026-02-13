@@ -6,6 +6,7 @@ use std::{
     io::{self, Read},
     path::Path,
 };
+use tlsn_common::msg::TdxPayload;
 use tracing::{debug, error, instrument};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +16,18 @@ pub struct Quote {
     mrsigner: Option<String>,
     mrenclave: Option<String>,
     error: Option<String>,
+}
+
+impl Quote {
+    pub(crate) fn into_tdx_payload(self, session_id: String) -> TdxPayload {
+        TdxPayload {
+            session_id,
+            raw_quote: self.raw_quote,
+            mrsigner: self.mrsigner,
+            mrenclave: self.mrenclave,
+            error: self.error,
+        }
+    }
 }
 
 impl Default for Quote {

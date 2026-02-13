@@ -13,6 +13,7 @@ use eyre::eyre;
 use notary_common::{NotarizationSessionRequest, NotarizationSessionResponse};
 use std::time::Duration;
 use tlsn_common::config::ProtocolConfigValidator;
+use tlsn_common::msg::TdxPayload;
 use tlsn_core::attestation::AttestationConfig;
 use tlsn_verifier::{Verifier, VerifierConfig};
 use tokio::{
@@ -226,10 +227,43 @@ pub async fn notary_service<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     #[allow(deprecated)]
     timeout(
         Duration::from_secs(notary_globals.notarization_config.timeout),
-        Verifier::new(config).notarize(socket.compat(), &att_config),
+        async move {
+            let mut verifier = Verifier::new(config).setup(socket.compat()).await?.run().await?;
+            verifier.notarize(&att_config).await?;
+
+            if want_tdx_payload {
+                let payload = build_tdx_payload(&notary_globals, session_id);
+                verifier.send_tdx_payload(payload).await?;
+            }
+
+            verifier.close().await?;
+
+            Ok::<(), NotaryServerError>(())
+        },
     )
     .await
     .map_err(|_| eyre!("Timeout reached before notarization completes"))??;
 
     Ok(())
+}
+
+fn build_tdx_payload(_notary_globals: &NotaryGlobals, session_id: &str) -> TdxPayload {
+    #[cfg(feature = "tee_quote")]
+    {
+        return _notary_globals
+            .tee_quote
+            .clone()
+            .into_tdx_payload(session_id.to_string());
+    }
+
+    #[cfg(not(feature = "tee_quote"))]
+    {
+        TdxPayload {
+            session_id: session_id.to_string(),
+            raw_quote: None,
+            mrsigner: None,
+            mrenclave: None,
+            error: Some("notary server was built without tee_quote support".to_string()),
+        }
+    }
 }
