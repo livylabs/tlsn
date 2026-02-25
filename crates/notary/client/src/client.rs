@@ -41,6 +41,9 @@ pub struct NotarizationRequest {
     max_sent_data: usize,
     /// Maximum number of bytes that can be received.
     max_recv_data: usize,
+    // Flag for getting the tdx tee attestation (default for bool is false)
+    #[builder(default)]
+    enable_tdx: bool,
 }
 
 impl NotarizationRequest {
@@ -276,6 +279,7 @@ impl NotaryClient {
                     client_type: ClientType::Tcp,
                     max_sent_data: Some(notarization_request.max_sent_data),
                     max_recv_data: Some(notarization_request.max_recv_data),
+                    tee_attestation: Some(notarization_request.enable_tdx),
                 })
                 .map_err(|err| {
                     error!("Failed to serialise http request for configuration");

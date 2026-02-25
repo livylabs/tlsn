@@ -22,6 +22,8 @@ pub struct NotarizationSessionRequest {
     pub max_sent_data: Option<usize>,
     /// Maximum data that can be received by the prover.
     pub max_recv_data: Option<usize>,
+    // Flag for enabling tdx attestation
+    pub tee_attestation: Option<bool>,
 }
 
 /// Response object of the /session API.

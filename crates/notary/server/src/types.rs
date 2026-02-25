@@ -10,6 +10,11 @@ use tokio::sync::Semaphore;
 use crate::tee::Quote;
 use crate::{auth::AuthorizationMode, config::NotarizationProperties};
 
+//Configuration associated with Tee attestation 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig{
+    pub enable_tee: bool 
+}
 /// Response object of the /info API
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,11 +44,12 @@ pub struct NotaryGlobals {
     pub crypto_provider: Arc<CryptoProvider>,
     pub notarization_config: NotarizationProperties,
     /// A temporary storage to store session_id
-    pub store: Arc<Mutex<HashMap<String, ()>>>,
+    pub store: Arc<Mutex<HashMap<String, SessionConfig>>>,
     /// Selected authorization mode if any
     pub authorization_mode: Option<AuthorizationMode>,
     /// A semaphore to acquire a permit for notarization
     pub semaphore: Arc<Semaphore>,
+    //Tee flag 
 }
 
 impl NotaryGlobals {
