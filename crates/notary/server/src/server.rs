@@ -151,7 +151,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
                         public_key: verifying_key_pem,
                         git_commit_hash,
                         #[cfg(feature = "tee_quote")]
-                        quote: tee_attestation("TDX TEE Attestation enabled "),
+                        quote: tee_attestation("TDX TEE Attestation enabled"),
                     }),
                 )
                     .into_response()

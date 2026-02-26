@@ -4,10 +4,11 @@ use tokio::process::Command;
 use tlsn_common::msg::TdxAttestation;
 use crate::NotaryServerError;
 
+use base64::prelude::*;
 
 pub async fn tee_attestation(reportdata: String) -> Result<TdxAttestation, NotaryServerError> {
     let attestation = Command::new("trustauthority-cli")
-        .args(["evidence", "--tdx" , "-u", &reportdata])
+        .args(["evidence", "--tdx" , "-u", &reportdata.to_base64()])
         .output()
         .await
         .map_err(|e|NotaryServerError::TeeAttestation(format!("Failed to produce Tee Attestation : {e}")))?;
@@ -39,4 +40,17 @@ pub async fn check_tee() -> Result<(), NotaryServerError>
         return Err(NotaryServerError::TeeAttestation(format!("Trust authority not installed")))
     }
     Ok(())
+}
+
+
+//Helper for the report data 
+pub trait ToBase64 {
+    fn to_base64(&self) -> String;
+}
+
+// Implement it for anything that can be viewed as bytes String, &str, Vec<u8>, etc.
+impl<T: AsRef<[u8]>> ToBase64 for T {
+    fn to_base64(&self) -> String {
+        BASE64_STANDARD.encode(self)
+    }
 }

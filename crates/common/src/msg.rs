@@ -13,30 +13,38 @@ pub struct ServerIdentityProof {
     pub data: ServerCertData,
 }
 
-/// TDX attestattion sent from Notary to Prover 
-#[derive(Debug, Serialize , Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TdxAttestation{
-    /// Type of tee attestation
-   pub tdx: TdxEvidence
+/// TDX attestation payload returned by an attestation provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TdxAttestation {
+    /// TDX evidence body.
+    pub tdx: TdxEvidence,
 }
-#[derive(Debug, Serialize , Deserialize)]
-/// Tee attestation data
-pub struct TdxEvidence{
-    /// Report customs data 64 bytes
+
+/// TDX evidence fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TdxEvidence {
+    /// Report custom data (provider-encoded string).
     pub runtime_data: String,
-    /// Tee quote used for verification
+    /// TEE quote string (provider-encoded, commonly base64).
     pub quote: String,
-    /// Anti-replay nonce
+    /// Anti-replay verifier nonce metadata.
     pub verifier_nonce: VerifierNonce,
 }
-#[derive(Debug, Serialize , Deserialize)]
-/// Extra metadata from the attestation
-pub struct VerifierNonce{
-    /// Random fresh value
+
+/// Verifier-issued nonce metadata for freshness validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifierNonce {
+    /// Fresh nonce value.
     pub val: String,
-    /// Timestamp
+    /// Issued-at timestamp.
     pub iat: String,
-    /// Signature from the verifier service
+    /// Verifier signature over the nonce payload.
     pub signature: String,
+}
+
+/// Wrapper message for sending TDX attestation alongside protocol data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeeAttestation {
+    /// Parsed TDX attestation payload.
+    pub tdx_attestation: TdxAttestation
 }
