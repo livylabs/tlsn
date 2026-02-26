@@ -23,6 +23,8 @@ pub struct NotaryServerProperties {
     pub log: LogProperties,
     /// Setting for authorization
     pub auth: AuthorizationProperties,
+    //Initializing tee
+    pub tee: bool,
 }
 
 impl NotaryServerProperties {
@@ -217,6 +219,7 @@ impl Default for NotaryServerProperties {
             tls: Default::default(),
             log: Default::default(),
             auth: Default::default(),
+            tee: false,
         }
     }
 }

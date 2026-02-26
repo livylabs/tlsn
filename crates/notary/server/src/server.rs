@@ -38,7 +38,7 @@ use crate::{
 };
 
 #[cfg(feature = "tee_quote")]
-use crate::tee::quote;
+use crate::tee_tdx::{check_tee, tee_attestation};
 
 use tokio::sync::Semaphore;
 
@@ -52,7 +52,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
         .map_err(|err| eyre!("Failed to get verifying key in PEM format: {err}"))?;
 
     #[cfg(feature = "tee_quote")]
-    let verifying_key_bytes = attestation_key.verifying_key_bytes();
+    check_tee().await?;
 
     let crypto_provider = build_crypto_provider(attestation_key);
 
@@ -151,7 +151,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
                         public_key: verifying_key_pem,
                         git_commit_hash,
                         #[cfg(feature = "tee_quote")]
-                        quote: quote(verifying_key_bytes).await,
+                        quote: tee_attestation("TDX TEE Attestation enabled "),
                     }),
                 )
                     .into_response()

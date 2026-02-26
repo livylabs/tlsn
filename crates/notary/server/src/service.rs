@@ -32,6 +32,7 @@ use crate::{
     },
     types::{NotarizationRequestQuery, NotaryGlobals, SessionConfig},
 };
+use crate::tee_tdx::tee_attestation;
 
 /// A wrapper enum to facilitate extracting TCP connection for either WebSocket
 /// or TCP clients, so that we can use a single endpoint and handler for
@@ -227,7 +228,7 @@ pub async fn notary_service<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
         )
         .crypto_provider(crypto_provider)
         .build()?;
-
+    
     #[allow(deprecated)]
     timeout(
         Duration::from_secs(notary_globals.notarization_config.timeout),
@@ -235,6 +236,11 @@ pub async fn notary_service<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     )
     .await
     .map_err(|_| eyre!("Timeout reached before notarization completes"))??;
+
+    if enable_tee{
+        let reportdata = session_id.to_string();
+        let tdx = tee_attestation(reportdata).await?;
+    }
 
     Ok(())
 }
