@@ -27,6 +27,7 @@ use tlsn_common::{
     config::ProtocolConfig,
     context::build_mt_context,
     encoding,
+    msg::TeeAttestation,
     mux::attach_mux,
     tag::verify_tags,
     transcript::{decode_transcript, verify_transcript, Record, TlsTranscript},
@@ -513,6 +514,27 @@ impl Verifier<state::Committed> {
         info!("Sent attestation");
 
         Ok(attestation)
+    }
+
+    /// Sends a TDX attestation message to the prover.
+    #[instrument(parent = &self.span, level = "info", skip_all, err)]
+    pub async fn send_tdx_attestation(
+        &mut self,
+        tdx_attestation: TeeAttestation,
+    ) -> Result<(), VerifierError> {
+        let state::Committed { mux_fut, ctx, .. } = &mut self.state;
+
+        mux_fut
+            .poll_with(
+                ctx.io_mut()
+                    .send(tdx_attestation)
+                    .map_err(VerifierError::from),
+            )
+            .await?;
+
+        info!("Sent TDX attestation");
+
+        Ok(())
     }
 
     /// Closes the connection with the prover.

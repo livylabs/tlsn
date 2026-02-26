@@ -38,7 +38,8 @@ use crate::{
 };
 
 #[cfg(feature = "tee_quote")]
-use crate::tee_tdx::{check_tee, tee_attestation};
+use crate::tee_tdx::{initialization_quote, InitializationTeeQuote};
+use crate::tee_tdx::check_tee;
 
 use tokio::sync::Semaphore;
 
@@ -51,8 +52,11 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
         .verifying_key_pem()
         .map_err(|err| eyre!("Failed to get verifying key in PEM format: {err}"))?;
 
-    #[cfg(feature = "tee_quote")]
-    check_tee().await?;
+    if config.tee {
+        if let Err(err) = check_tee().await {
+            warn!("TrustAuthority startup check failed: {}", err);
+        }
+    }
 
     let crypto_provider = build_crypto_provider(attestation_key);
 
@@ -122,6 +126,12 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
     // Parameters needed for the info endpoint
     let version = env!("CARGO_PKG_VERSION").to_string();
     let git_commit_hash = env!("GIT_COMMIT_HASH").to_string();
+    #[cfg(feature = "tee_quote")]
+    let info_quote = if config.tee {
+        initialization_quote(b"Tee Enabled").await
+    } else {
+        InitializationTeeQuote::unavailable("Tdx Not available: NS_TEE is disabled")
+    };
 
     // Parameters needed for the root / endpoint
     let html_string = config.html_info.clone();
@@ -151,7 +161,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
                         public_key: verifying_key_pem,
                         git_commit_hash,
                         #[cfg(feature = "tee_quote")]
-                        quote: tee_attestation("TDX TEE Attestation enabled"),
+                        quote: info_quote.clone(),
                     }),
                 )
                     .into_response()

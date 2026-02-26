@@ -7,6 +7,8 @@ mod server;
 mod server_tracing;
 mod service;
 mod signing;
+#[cfg(feature = "tee_quote")]
+mod tee;
 mod tee_tdx;
 mod types;
 mod util;

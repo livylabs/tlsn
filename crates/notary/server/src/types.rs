@@ -7,7 +7,7 @@ use tlsn_core::CryptoProvider;
 use tokio::sync::Semaphore;
 
 #[cfg(feature = "tee_quote")]
-use crate::tee::Quote;
+use crate::tee_tdx::InitializationTeeQuote;
 use crate::{auth::AuthorizationMode, config::NotarizationProperties};
 
 //Configuration associated with Tee attestation 
@@ -25,9 +25,9 @@ pub struct InfoResponse {
     pub public_key: String,
     /// Current git commit hash of notary-server
     pub git_commit_hash: String,
-    /// Hardware attestation
+    /// Cached TDX initialization attestation (Trust Authority) or availability error
     #[cfg(feature = "tee_quote")]
-    pub quote: Quote,
+    pub quote: InitializationTeeQuote,
 }
 
 /// Request query of the /notarize API

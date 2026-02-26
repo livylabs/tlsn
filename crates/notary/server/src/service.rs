@@ -13,6 +13,7 @@ use eyre::eyre;
 use notary_common::{NotarizationSessionRequest, NotarizationSessionResponse};
 use std::time::Duration;
 use tlsn_common::config::ProtocolConfigValidator;
+use tlsn_common::msg::TeeAttestation;
 use tlsn_core::attestation::AttestationConfig;
 use tlsn_verifier::{Verifier, VerifierConfig};
 use tokio::{
@@ -230,17 +231,37 @@ pub async fn notary_service<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
         .build()?;
     
     #[allow(deprecated)]
-    timeout(
+    let mut verifier = timeout(
         Duration::from_secs(notary_globals.notarization_config.timeout),
-        Verifier::new(config).notarize(socket.compat(), &att_config),
+        async {
+            let verifier = Verifier::new(config).setup(socket.compat()).await?;
+            verifier.run().await
+        },
+    )
+    .await
+    .map_err(|_| eyre!("Timeout reached before notarization setup/run completes"))??;
+    
+    #[allow(deprecated)]
+    let _attestation = timeout(
+        Duration::from_secs(notary_globals.notarization_config.timeout),
+        verifier.notarize(&att_config),
     )
     .await
     .map_err(|_| eyre!("Timeout reached before notarization completes"))??;
-
-    if enable_tee{
+    
+    if enable_tee {
         let reportdata = session_id.to_string();
         let tdx = tee_attestation(reportdata).await?;
+    
+        verifier
+            .send_tdx_attestation(TeeAttestation {
+                tdx_attestation: tdx,
+            })
+            .await?;
     }
-
+    
+    verifier.close().await?;
+    
     Ok(())
+    
 }
