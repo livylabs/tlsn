@@ -18,6 +18,8 @@ pub enum NotaryServerError {
     BadProverRequest(String),
     #[error("Unauthorized request from prover: {0}")]
     UnauthorizedProverRequest(String),
+    #[error("Tdx attestation error {0}")]
+    TeeAttestation(String),
 }
 
 impl From<VerifierError> for NotaryServerError {
@@ -37,6 +39,7 @@ impl From<ProtocolConfigValidatorBuilderError> for NotaryServerError {
         Self::Notarization(Box::new(error))
     }
 }
+
 
 /// Trait implementation to convert this error into an axum http response
 impl AxumCoreIntoResponse for NotaryServerError {
