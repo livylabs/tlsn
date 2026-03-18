@@ -4,6 +4,9 @@ use async_tungstenite::{
     tokio::{connect_async, connect_async_with_tls_connector_and_config},
     tungstenite::protocol::WebSocketConfig,
 };
+use attestation_verifier::{
+    decode_tdx_quote_json, extract_report_data_hex, verify_tdx_quote_json,
+};
 use futures::{AsyncRead, AsyncWrite};
 use http_body_util::{BodyExt as _, Empty, Full};
 use hyper::{body::Bytes, Request, StatusCode};
@@ -128,6 +131,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_string_pretty(&tee_attestation)?
     );
 
+    let tdx_attestation_json = serde_json::to_string(&tee_attestation.tdx_attestation)?;
+    let quote = decode_tdx_quote_json(&tdx_attestation_json)?;
+    let report_data_hex = extract_report_data_hex(&quote)?;
+    verify_tdx_quote_json(&tdx_attestation_json).await?;
+    println!("TDX attestation verified successfully");
+    println!("Extracted TDX report data: {report_data_hex}");
+
     tokio::fs::write("ws-test.attestation.tlsn", bincode::serialize(&attestation)?).await?;
     tokio::fs::write("ws-test.secrets.tlsn", bincode::serialize(&secrets)?).await?;
 
@@ -192,7 +202,6 @@ async fn create_websocket_session(
         max_recv_data: Some(max_recv_data),
         tee_attestation: Some(true),
     })?;
-
     let session_uri = format!("{notary_scheme}://{notary_host}:{notary_port}/session");
 
     let response = if notary_scheme == "https" {
