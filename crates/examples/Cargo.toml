@@ -11,6 +11,8 @@ notary_tee = []
 workspace = true
 
 [dependencies]
+async-tungstenite = { workspace = true, features = ["tokio-runtime", "tokio-native-tls"] }
+notary-common = { workspace = true }
 notary-client = { workspace = true }
 tlsn-common = { workspace = true }
 tlsn-core = { workspace = true }
@@ -31,6 +33,7 @@ futures = { workspace = true }
 http-body-util = { workspace = true }
 hex = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1"] }
+hyper-tls = { version = "0.6", features = ["vendored"] }
 hyper-util = { workspace = true, features = ["full"] }
 k256 = { workspace = true, features = ["ecdsa"] }
 serde_json = { workspace = true }
@@ -42,9 +45,11 @@ tokio = { workspace = true, features = [
   "io-std",
   "fs",
 ] }
+tokio-native-tls = { version = "0.3.1", features = ["vendored"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ws_stream_tungstenite = { workspace = true, features = ["tokio_io"] }
 
 [[example]]
 name = "attestation_prove"
@@ -65,3 +70,7 @@ path = "interactive/interactive.rs"
 [[example]]
 name = "tee"
 path = "tee/fetch.rs"
+
+[[example]]
+name = "tee_ws"
+path = "tee/ws.rs"
