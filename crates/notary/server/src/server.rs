@@ -121,6 +121,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
         config.notarization.clone(),
         authorization_mode,
         Arc::new(Semaphore::new(config.concurrency)),
+        Arc::new(verifying_key_pem),
     );
 
     // Parameters needed for the info endpoint
@@ -139,8 +140,9 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
         html_string
             .replace("{version}", &version)
             .replace("{git_commit_hash}", &git_commit_hash)
-            .replace("{public_key}", &verifying_key_pem),
+            .replace("{public_key}", &notary_globals.public_key),
     );
+    let info_public_key = notary_globals.public_key.clone();
 
     let router = Router::new()
         .route(
@@ -158,7 +160,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
                     StatusCode::OK,
                     Json(InfoResponse {
                         version,
-                        public_key: verifying_key_pem,
+                        public_key: info_public_key.to_string(),
                         git_commit_hash,
                         #[cfg(feature = "tee_quote")]
                         quote: info_quote.clone(),

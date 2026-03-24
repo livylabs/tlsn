@@ -50,6 +50,7 @@ pub struct NotaryGlobals {
     /// A semaphore to acquire a permit for notarization
     pub semaphore: Arc<Semaphore>,
     //Tee flag 
+    pub public_key: Arc<String>
 }
 
 impl NotaryGlobals {
@@ -58,6 +59,7 @@ impl NotaryGlobals {
         notarization_config: NotarizationProperties,
         authorization_mode: Option<AuthorizationMode>,
         semaphore: Arc<Semaphore>,
+        public_key: Arc<String>,
     ) -> Self {
         Self {
             crypto_provider,
@@ -65,6 +67,7 @@ impl NotaryGlobals {
             store: Default::default(),
             authorization_mode,
             semaphore,
+            public_key,
         }
     }
 }

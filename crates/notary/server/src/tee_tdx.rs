@@ -36,7 +36,7 @@ impl InitializationTeeQuote {
 }
 
 /// Produces a per-notarization TDX attestation from Trust Authority.
-pub async fn tee_attestation(reportdata: String) -> Result<TeeQuote, NotaryServerError> {
+pub async fn tee_attestation(reportdata: &str) -> Result<TeeQuote, NotaryServerError> {
     tee_attestation_bytes(reportdata.as_bytes()).await
 }
 

@@ -250,8 +250,7 @@ pub async fn notary_service<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     .map_err(|_| eyre!("Timeout reached before notarization completes"))??;
     
     if enable_tee {
-        let reportdata = session_id.to_string();
-        let tdx = tee_attestation(reportdata).await?;
+        let tdx = tee_attestation(notary_globals.public_key.as_str()).await?;
     
         verifier
             .send_tdx_attestation(TeeAttestation {
