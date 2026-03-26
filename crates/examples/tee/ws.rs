@@ -63,17 +63,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let use_fixture_ca = env::var("USE_FIXTURE_CA")
         .map(|value| value == "true" || value == "1")
         .unwrap_or(true);
+    let enable_tee_attestation = env::var("ENABLE_TEE_ATTESTATION")
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(true);
 
+    let total_start = std::time::Instant::now();
+
+    let session_start = std::time::Instant::now();
     let session_id =
-        create_websocket_session(&notary_scheme, &notary_host, notary_port, max_sent_data, max_recv_data)
+        create_websocket_session(
+            &notary_scheme,
+            &notary_host,
+            notary_port,
+            max_sent_data,
+            max_recv_data,
+            enable_tee_attestation,
+        )
             .await?;
-    info!(%session_id, "Created websocket notarization session");
+    info!(
+        %session_id,
+        enable_tee_attestation,
+        elapsed_ms = session_start.elapsed().as_millis(),
+        "Created websocket notarization session"
+    );
 
+    let websocket_start = std::time::Instant::now();
     let notary_ws_socket =
         connect_notary_websocket(&notary_scheme, &notary_host, notary_port, &session_id).await?;
+    info!(
+        elapsed_ms = websocket_start.elapsed().as_millis(),
+        "Connected websocket to notary"
+    );
 
     let crypto_provider = build_target_crypto_provider(use_fixture_ca)?;
 
+    let setup_start = std::time::Instant::now();
     let prover_config = ProverConfig::builder()
         .server_name(target_server_name.as_str())
         .protocol_config(
@@ -86,7 +110,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let prover = Prover::new(prover_config).setup(notary_ws_socket).await?;
+    info!(
+        elapsed_ms = setup_start.elapsed().as_millis(),
+        "Set up prover with notary connection"
+    );
 
+    let fetch_start = std::time::Instant::now();
     let client_socket = tokio::net::TcpStream::connect((target_host.as_str(), target_port)).await?;
     let (mpc_tls_connection, prover_fut) = prover.connect(client_socket.compat()).await?;
     let mpc_tls_connection = TokioIo::new(mpc_tls_connection.compat());
@@ -110,6 +139,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Application server response: {}", response.status());
     assert_eq!(response.status(), StatusCode::OK);
     let _ = response.into_body().collect().await?;
+    info!(
+        elapsed_ms = fetch_start.elapsed().as_millis(),
+        "Completed MPC-TLS fetch against target"
+    );
 
     let mut prover = prover_task.await??;
 
@@ -122,24 +155,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     request_builder.transcript_commit(builder.build()?);
     let request_config = request_builder.build()?;
 
+    let notarization_start = std::time::Instant::now();
     #[allow(deprecated)]
-    let (attestation, secrets, tee_attestation) = prover.notarize_with_tee(&request_config).await?;
-
-    println!("TLSN attestation received from notary");
-    println!(
-        "TDX attestation packet:\n{}",
-        serde_json::to_string_pretty(&tee_attestation)?
+    let (attestation, secrets, tee_attestation) = if enable_tee_attestation {
+        let (attestation, secrets, tee_attestation) =
+            prover.notarize_with_tee(&request_config).await?;
+        (attestation, secrets, Some(tee_attestation))
+    } else {
+        let (attestation, secrets) = prover.notarize(&request_config).await?;
+        (attestation, secrets, None)
+    };
+    let notarization_ms = notarization_start.elapsed().as_millis();
+    let total_e2e_ms = total_start.elapsed().as_millis();
+    info!(
+        enable_tee_attestation,
+        elapsed_ms = notarization_ms,
+        "Completed prover notarization request"
+    );
+    info!(
+        enable_tee_attestation,
+        elapsed_ms = total_e2e_ms,
+        "Completed prover end-to-end flow through notarization"
     );
 
-    let tdx_attestation_json = serde_json::to_string(&tee_attestation.tdx_attestation)?;
-    let quote = decode_tdx_quote_json(&tdx_attestation_json)?;
-    let report_data_hex = extract_report_data_hex(&quote)?;
-    verify_tdx_quote_json(&tdx_attestation_json).await?;
-    println!("TDX attestation verified successfully");
-    println!("Extracted TDX report data: {report_data_hex}");
+    println!("TLSN attestation received from notary");
+    let mut tdx_verify_ms = None;
+    if let Some(tee_attestation) = tee_attestation {
+        let verification_start = std::time::Instant::now();
+        println!(
+            "TDX attestation packet:\n{}",
+            serde_json::to_string_pretty(&tee_attestation)?
+        );
+
+        let tdx_attestation_json = serde_json::to_string(&tee_attestation.tdx_attestation)?;
+        let quote = decode_tdx_quote_json(&tdx_attestation_json)?;
+        let report_data_hex = extract_report_data_hex(&quote)?;
+        verify_tdx_quote_json(&tdx_attestation_json).await?;
+        println!("TDX attestation verified successfully");
+        println!("Extracted TDX report data: {report_data_hex}");
+        let verification_ms = verification_start.elapsed().as_millis();
+        tdx_verify_ms = Some(verification_ms);
+        info!(
+            elapsed_ms = verification_ms,
+            "Verified returned TDX attestation locally"
+        );
+    }
 
     tokio::fs::write("ws-test.attestation.tlsn", bincode::serialize(&attestation)?).await?;
     tokio::fs::write("ws-test.secrets.tlsn", bincode::serialize(&secrets)?).await?;
+
+    println!(
+        "NOTARIZATION_MS={} ENABLE_TEE_ATTESTATION={}",
+        notarization_ms,
+        enable_tee_attestation
+    );
+    println!(
+        "TOTAL_E2E_MS={} ENABLE_TEE_ATTESTATION={}",
+        total_e2e_ms,
+        enable_tee_attestation
+    );
+    if let Some(tdx_verify_ms) = tdx_verify_ms {
+        println!(
+            "TDX_VERIFY_MS={} ENABLE_TEE_ATTESTATION={}",
+            tdx_verify_ms,
+            enable_tee_attestation
+        );
+    }
 
     prover.close().await?;
 
@@ -195,12 +276,13 @@ async fn create_websocket_session(
     notary_port: u16,
     max_sent_data: usize,
     max_recv_data: usize,
+    enable_tee_attestation: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let payload = serde_json::to_vec(&NotarizationSessionRequest {
         client_type: ClientType::Websocket,
         max_sent_data: Some(max_sent_data),
         max_recv_data: Some(max_recv_data),
-        tee_attestation: Some(true),
+        tee_attestation: Some(enable_tee_attestation),
     })?;
     let session_uri = format!("{notary_scheme}://{notary_host}:{notary_port}/session");
 
