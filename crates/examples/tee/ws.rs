@@ -4,9 +4,8 @@ use async_tungstenite::{
     tokio::{connect_async, connect_async_with_tls_connector_and_config},
     tungstenite::protocol::WebSocketConfig,
 };
-use attestation_verifier::{
-    decode_tdx_quote_json, extract_report_data_hex, verify_tdx_quote_json,
-};
+use attestation_verifier::{decode_tdx_quote_json, extract_report_data_hex, verify_tdx_quote_json};
+use clap::Parser;
 use futures::{AsyncRead, AsyncWrite};
 use http_body_util::{BodyExt as _, Empty, Full};
 use hyper::{body::Bytes, Request, StatusCode};
@@ -33,9 +32,17 @@ trait NotaryIo: AsyncRead + AsyncWrite + Send + Unpin {}
 
 impl<T> NotaryIo for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 
+#[derive(Debug, Parser)]
+struct Args {
+    /// Verify the returned TDX quote locally.
+    #[arg(long)]
+    verify: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+    let args = Args::parse();
 
     let notary_scheme = env::var("NOTARY_SCHEME").unwrap_or("http".into());
     let notary_host: String = env::var("NOTARY_HOST").unwrap_or("127.0.0.1".into());
@@ -181,24 +188,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("TLSN attestation received from notary");
     let mut tdx_verify_ms = None;
     if let Some(tee_attestation) = tee_attestation {
-        let verification_start = std::time::Instant::now();
-        println!(
-            "TDX attestation packet:\n{}",
-            serde_json::to_string_pretty(&tee_attestation)?
-        );
+        if args.verify {
+            let verification_start = std::time::Instant::now();
+            println!(
+                "TDX attestation packet:\n{}",
+                serde_json::to_string_pretty(&tee_attestation)?
+            );
 
-        let tdx_attestation_json = serde_json::to_string(&tee_attestation.tdx_attestation)?;
-        let quote = decode_tdx_quote_json(&tdx_attestation_json)?;
-        let report_data_hex = extract_report_data_hex(&quote)?;
-        verify_tdx_quote_json(&tdx_attestation_json).await?;
-        println!("TDX attestation verified successfully");
-        println!("Extracted TDX report data: {report_data_hex}");
-        let verification_ms = verification_start.elapsed().as_millis();
-        tdx_verify_ms = Some(verification_ms);
-        info!(
-            elapsed_ms = verification_ms,
-            "Verified returned TDX attestation locally"
-        );
+            let tdx_attestation_json = serde_json::to_string(&tee_attestation.tdx_attestation)?;
+            let quote = decode_tdx_quote_json(&tdx_attestation_json)?;
+            let report_data_hex = extract_report_data_hex(&quote)?;
+            verify_tdx_quote_json(&tdx_attestation_json).await?;
+            println!("TDX attestation verified successfully");
+            println!("Extracted TDX report data: {report_data_hex}");
+            let verification_ms = verification_start.elapsed().as_millis();
+            tdx_verify_ms = Some(verification_ms);
+            info!(
+                elapsed_ms = verification_ms,
+                "Verified returned TDX attestation locally"
+            );
+        } else {
+            println!("Skipping local TDX attestation verification (pass --verify to enable)");
+        }
     }
 
     tokio::fs::write("ws-test.attestation.tlsn", bincode::serialize(&attestation)?).await?;
